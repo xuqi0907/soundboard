@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>語音溝通板</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+        /* 針對手機瀏覽器全面優化觸控反饋 */
+        .btn-tap { 
+            -webkit-tap-highlight-color: transparent; 
+            outline: none;
+            transition: background-color 0.05s ease, filter 0.05s ease;
+        }
+        
+        /* 當按鈕被按住時：顏色變淺、變亮，並產生微發光感 */
+        .btn-tap:active { 
+            background-color: #334155 !important; /* 點擊時強制背景底色變淺 (從 slate-900 變到 slate-700) */
+            filter: brightness(1.3); /* 整體亮度提升 30% */
+        }
+        
+        .scroll-smooth-container {
+            -webkit-overflow-scrolling: touch;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen p-3 flex flex-col justify-between select-none overflow-hidden">
+
+    <div class="bg-slate-900 p-4 rounded-2xl shadow-xl mb-4 border border-slate-800 flex-shrink-0">
+        <div class="flex flex-col gap-3">
+            <input type="text" id="txt" placeholder="💬 輸入按鈕文字 (如：謝謝、要、等一下)" class="w-full px-3 py-3 bg-slate-800 rounded-xl text-base border border-slate-700 focus:outline-none focus:border-blue-500 text-white placeholder-slate-500">
+            <div class="flex gap-2">
+                <input type="file" id="aud" accept=".mp3,audio/mpeg,audio/*" class="hidden" onchange="handleFileSelect(this)">
+                <button type="button" onclick="triggerFilePicker()" id="fileLbl" class="flex-1 bg-slate-800 border border-slate-700 rounded-xl py-3 text-xs font-medium text-slate-300 active:bg-slate-700 truncate px-2">📁 選擇 MP3 檔案 (選填)</button>
+                <button type="button" onclick="addBtn()" class="flex-1 bg-blue-600 active:bg-blue-700 text-white py-3 rounded-xl text-sm font-bold shadow-lg shadow-blue-900/30">➕ 加入溝通板</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="flex-grow overflow-y-auto pr-1 scroll-smooth-container">
+        <div id="grid" class="grid grid-cols-3 gap-2.5 pb-4">
+            </div>
+    </div>
+
+    <div class="text-center text-xs text-slate-500 mt-2 py-2 border-t border-slate-900 flex-shrink-0">
+        ❤️ 點擊新按鈕會自然淡出前一個聲音<br>點擊右上方「✕」即可刪除按鈕
+    </div>
+
+    <script>
+        let db = null, buttonsData = [], curAud = null, fadeItv = null, selectedFileBlob = null, currentAudioUrl = null;
+        function triggerFilePicker() { document.getElementById('aud').click(); }
+        function handleFileSelect(input) {
+            const file = input.files[0];
+            if (file) {
+                selectedFileBlob = file;
+                const displayName = file.name.length > 10 ? file.name.substring(0, 8) + '...' : file.name;
+                document.getElementById('fileLbl').innerText = '✅ 已選: ' + displayName;
+                document.getElementById('fileLbl').classList.add('text-green-400', 'border-green-800');
+            }
+        }
+        
+        const req = indexedDB.open("AAC_Mobile_Soundboard", 2);
+        req.onupgradeneeded = function(e) {
+            let database = e.target.result;
+            if (!database.objectStoreNames.contains("buttons")) { database.createObjectStore("buttons", { keyPath: "id", autoIncrement: true }); }
+        };
+        req.onsuccess = function(e) { db = e.target.result; loadButtons(); };
+        req.onerror = function() { alert("資料庫啟動失敗"); renderStaticDefaults(); };
+        
+        function loadButtons() {
+            if (!db) return;
+            let tx = db.transaction("buttons", "readonly");
+            let store = tx.objectStore("buttons");
+            let getReq = store.getAll();
+            getReq.onsuccess = function() {
+                buttonsData = getReq.result || [];
+                if (buttonsData.length === 0) {
+                    const defaults = [{ text: "要", blob: null }, { text: "不要", blob: null }, { text: "謝謝", blob: null }, { text: "請等一下", blob: null }, { text: "請幫幫我", blob: null }, { text: "喉嚨很痛", blob: null }];
+                    let txWrite = db.transaction("buttons", "readwrite");
+                    let storeWrite = txWrite.objectStore("buttons");
+                    defaults.forEach(d => storeWrite.add(d));
+                    txWrite.oncomplete = function() { loadButtons(); };
+                } else { render(); }
+            };
+        }
+        
+        function render() {
+            const g = document.getElementById('grid'); g.innerHTML = '';
+            buttonsData.forEach((b) => {
+                // 核心修正：改用原生 <button> 標籤，讓手機系統百分之百捕捉到觸控 active 狀態
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn-tap bg-slate-900 border border-slate-800 text-white rounded-2xl shadow-md flex flex-col items-center justify-center min-h-[85px] p-2 relative text-center w-full';
+                
+                // 為了避免點擊刪除鍵（✕）時，整個大按鈕也跟著閃爍，把邏輯綁定在文字上
+                btn.innerHTML = `
+                    <span class="text-base font-semibold break-all px-1 leading-tight text-slate-100 pointer-events-none">${b.text}</span>
+                    <span onclick="delBtn(${b.id}, event)" class="absolute top-0 right-0 text-slate-600 active:text-red-400 p-2 text-sm font-bold z-10">✕</span>
+                `;
+                
+                // 點擊大按鈕播放聲音
+                btn.onclick = (e) => {
+                    // 如果點到的是叉叉，不要播放
+                    if(e.target.innerText === '✕') return;
+                    play(b);
+                };
+                g.appendChild(btn);
+            });
+        }
+        
+        function play(b) {
+            if (curAud) {
+                clearInterval(fadeItv);
+                let old = curAud; let v = old.volume;
+                fadeItv = setInterval(() => { if (v > 0.1) { v -= 0.2; old.volume = Math.max(0, v); } else { clearInterval(fadeItv); old.pause(); } }, 20);
+            }
+            window.speechSynthesis.cancel();
+            if (b.blob) {
+                if (currentAudioUrl) { URL.revokeObjectURL(currentAudioUrl); }
+                currentAudioUrl = URL.createObjectURL(b.blob);
+                curAud = new Audio(currentAudioUrl); curAud.volume = 1.0;
+                curAud.play().catch(() => alert('播放失敗'));
+            } else {
+                const u = new SpeechSynthesisUtterance(b.text); u.lang = 'zh-TW'; u.rate = 1.05; window.speechSynthesis.speak(u); curAud = null;
+            }
+        }
+        function addBtn() {
+            const t = document.getElementById('txt').value.trim();
+            if (!t) return alert('請輸入按鈕文字');
+            const newItem = { text: t, blob: selectedFileBlob || null };
+            if (db) {
+                let tx = db.transaction("buttons", "readwrite");
+                let store = tx.objectStore("buttons");
+                store.add(newItem);
+                tx.oncomplete = function() { loadButtons(); clearForm(); };
+            } else { newItem.id = Date.now(); buttonsData.push(newItem); render(); clearForm(); }
+        }
+        function delBtn(id, e) {
+            e.stopPropagation();
+            if (!confirm('確定刪除此按鈕？')) return;
+            if (db) {
+                let tx = db.transaction("buttons", "readwrite");
+                let store = tx.objectStore("buttons");
+                store.delete(id);
+                tx.oncomplete = function() { loadButtons(); };
+            } else { buttonsData = buttonsData.filter(b => b.id !== id); render(); }
+        }
+        function clearForm() {
+            document.getElementById('txt').value = ''; document.getElementById('aud').value = ''; selectedFileBlob = null;
+            document.getElementById('fileLbl').innerText = '📁 選擇 MP3 檔案 (選填)';
+            document.getElementById('fileLbl').className = "flex-1 bg-slate-800 border border-slate-700 rounded-xl py-3 text-xs font-medium text-slate-300 active:bg-slate-700 truncate px-2";
+        }
+    </script>
+</body>
+</html>
